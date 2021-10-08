@@ -1,0 +1,5 @@
+project:
+  - name: GitHub Demo
+    org: GitHub-Demo
+    repos: 
+      - demo-repo

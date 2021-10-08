@@ -1,0 +1,139 @@
+def jiraSite = 'Jira'
+def githubUrl = "https://github.example.com/api/v3"
+def githubCredential = '3ef2b4de-8f11-441e-9a61-a96f05cd771b'
+
+pipeline {
+  agent any
+  triggers {
+    GenericTrigger(
+      genericVariables: [
+        [key: 'event', value: '$.webhookEvent'],
+        [key: 'version', value: '$.version'],
+        [key: 'projectId', value: '$.version.projectId'],
+        [key: 'name', value: '$.version.name'],
+        [key: 'description', value: '$.version.description']
+      ],
+
+      causeString: "Triggered by Jira Release",
+      token: '808c9e1f-db71-421c-8c44-8e7142233f8e',
+      printContributedVariables: true,
+      printPostContent: true,
+      silentResponse: false,
+      regexpFilterText: '',
+      regexpFilterExpression: ''
+    )
+  }
+  stages {
+    stage('Create Release Branches') {
+      when {
+        expression { event == 'jira:version_created' }
+      }
+      steps {
+        createBranches(jiraSite, githubUrl, githubCredential)
+      }
+    }
+    stage('Create Release') {
+      when {
+        expression { event == 'jira:version_released' }
+      }
+      steps {
+        createRelease(jiraSite, githubUrl, githubCredential)
+      }
+    }
+  }
+}
+
+def getSettings(settingsFile='.github/jira-workflow.yml') {
+  try {
+    settings = readYaml(file: settingsFile)
+    return settings
+  } catch(err) {
+    echo "Please create ${settingsFile} in the repo"
+    throw err
+  }
+}
+
+def createBranches(jiraSite, githubUrl, githubCredential) {
+  def repos = [:]
+  settings = getSettings()
+  projectInfo = jiraGetProject(idOrKey: projectId, site: jiraSite)
+  settings.project.each { p ->
+    if (p.name.toString() == projectInfo.data.name.toString()) {
+      p.repos.each { repo ->
+        repos[repo] = {
+          node {
+            httpRequest(
+              authentication: githubCredential,
+              contentType: 'APPLICATION_JSON',
+              consoleLogResponseBody: true,
+              httpMode: 'GET',
+              outputFile: "${p.org}_${repo}_main_refs.json",
+              url: "${githubUrl}/repos/${p.org}/${repo}/git/refs/heads/main")
+            mainRefs = readJSON(file: "${p.org}_${repo}_main_refs.json")
+            payload = """{
+              "ref": "refs/heads/release/${name}",
+              "sha": "${mainRefs['object']['sha']}"
+            }"""
+            httpRequest(
+              authentication: githubCredential,
+              contentType: 'APPLICATION_JSON',
+              consoleLogResponseBody: true,
+              httpMode: 'POST',
+              ignoreSslErrors: false,
+              requestBody: payload,
+              responseHandle: 'NONE',
+              url: "${githubUrl}/repos/${p.org}/${repo}/git/refs")
+          }
+        }
+      }
+      parallel repos
+    }
+  }
+}
+
+def createRelease(jiraSite, githubUrl, githubCredential) {
+  def repos = [:]
+  settings = getSettings()
+  projectInfo = jiraGetProject(idOrKey: projectId, site: jiraSite)
+  jql = jiraJqlSearch(jql: "fixVersion=${name}", site: jiraSite) // Query Jira for issues related to the release
+  releaseDescription = "### Release Notes\\n${description}\\n### Associated Jira Issues\\n"
+  jql.data.issues.each { issue ->
+    releaseDescription += "[${issue.key}](https://jira.example.com/browse/${issue.key})\\n"
+  }
+  settings.project.each { p ->
+    if (p.name.toString() == projectInfo.data.name.toString()) {
+      p.repos.each { repo ->
+        repos[repo] = {
+          node {
+            httpRequest(
+              authentication: githubCredential,
+              contentType: 'APPLICATION_JSON',
+              consoleLogResponseBody: true,
+              httpMode: 'GET',
+              outputFile: "${p.org}_${repo}_releases.json",
+              url: "${githubUrl}/repos/${p.org}/${repo}/releases")
+              releases = readJSON(file: "${p.org}_${repo}_releases.json")
+              def payload = """{
+                "tag_name": "${name}",
+                "target_commitish": "release/${name}",
+                "name": "${name}",
+                "body": "${releaseDescription}",
+                "draft": false,
+                "prerelease": false
+              }"""
+              httpRequest(
+                authentication: githubCredential,
+                contentType: 'APPLICATION_JSON',
+                consoleLogResponseBody: true,
+                httpMode: 'POST',
+                ignoreSslErrors: false,
+                requestBody: payload,
+                responseHandle: 'NONE',
+                url: "${githubUrl}/repos/${p.org}/${repo}/releases")
+          }
+        }
+      }
+      parallel repos
+    }
+  }
+}

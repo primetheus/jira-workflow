@@ -1,0 +1,148 @@
+pipeline {
+  agent any
+  triggers {
+    GenericTrigger(
+      genericVariables: [
+        [key: 'action', value: '$.action'],
+        [key: 'number', value: '$.number'],
+        [key: 'pull_request', value: '$.pull_request']
+      ],
+
+      causeString: "Triggered by GitHub Pull Request",
+      token: '185f6bad-58f2-487c-85a1-6eeb3dd8feba',
+      printContributedVariables: false,
+      printPostContent: false,
+    )
+  }
+  stages {
+    stage('Set Initial PR status') {
+      steps {
+        script {
+          args = [status: 'in_progress', head_sha: pull_request_head_sha, repository_url: pull_request_base_repo_url]
+          setCheckStatus(args)
+        }
+      }
+    }
+    stage('Validate Issue') {
+      steps {
+        script {
+            def issue = getIssue(pull_request_title)
+            if (issue) {
+                // Validate that it's in the state that we want... in this case, 4 = 'In Progress'
+                def issueStatus = validateIssue(issue)
+                if (issueStatus == 'In Progress') {
+                    // Set success variables
+                    conclusion = 'success'
+                    title = 'Jira issue: ' + issue + ' is ' + issueStatus
+                    summary = 'Jira issue: ' + issue + ' is ' + issueStatus
+                    currentBuild.result = 'SUCCESS'
+                } else {
+                    // Issue is not in the correct status
+                    conclusion = 'failure'
+                    title = 'Jira issue: ' + issue + ' not found in Jira'
+                    summary = 'Jira issue: ' + issue + ' not found in Jira'
+                    currentBuild.result = 'FAILURE'
+                }
+            } else {
+                // Issue not found in Jira
+                title = 'Jira issue not found'
+                summary = 'Jira issue not found'
+                conclusion = 'failure'
+                currentBuild.result = 'FAILURE'
+            }
+        }
+      }
+    }
+  }
+  post {
+      always {
+          script {
+                // Update the GitHub Status
+                def run = readJSON(file: 'checkrun.json')
+                args = [
+                    status: 'completed', 
+                    id: run.id, 
+                    conclusion: conclusion, 
+                    title: title,
+                    summary: summary, 
+                    repository_url: pull_request_base_repo_url]
+                setCheckStatus(args)
+            }
+        }
+    }
+}
+
+// Declare some empty variables to use in our pipeline
+String checkRun
+String summary
+String title
+def args = [:]
+
+/**
+  * Set the check run status
+  * @param body
+  * @return issue
+  */
+@NonCPS
+String getIssue(String body) {
+    def pattern = /^(?<jira>[A-Z]{2,4}-\d{1,3}).*$/
+    def matcher = body =~ pattern
+    return  matcher.matches() ? matcher.group("jira") : null
+}
+
+/**
+  * @param id
+  * @param status
+  * @param conclusion
+  * @param summary
+  * @param head_sha
+  */
+def setCheckStatus(Map args) {
+    def endpoint
+    def method
+    switch (args.status) {
+        case 'in_progress':
+            method = 'POST'
+            endpoint = args.repository_url + '/check-runs'
+            request_body = '{"name": "github/jira-validation", "head_sha": "'+args.head_sha+'", "status": "in_progress"}'
+            break
+        case 'completed':
+            method = 'PATCH'
+            endpoint = args.repository_url + '/check-runs/' + args.id
+            request_body = '{"name": "github/jira-validation", "head_sha": "'+args.repo_name+'",'+
+                    '"conclusion": "'+args.conclusion+'", "status": "completed", "output": {"title": "Jira Issue Validate", "summary": "'+args.summary+'"}'
+            break
+        default:
+            break
+    }
+    httpRequest(
+        authentication: '3ef2b4de-8f11-441e-9a61-a96f05cd77bb', 
+        consoleLogResponseBody: false, 
+        contentType: 'APPLICATION_JSON', 
+        customHeaders: [[
+            maskValue: false, 
+            name: 'Accept', 
+            value: 'application/vnd.github.v3+json'
+            ]], 
+        httpMode: method, 
+        responseHandle: 'NONE',
+        requestBody: request_body, 
+        url: endpoint, 
+        outputFile: 'checkrun.json',
+        wrapAsMultipart: false)
+}
+
+/**
+  * @param idOrKey
+  * @return String
+  */
+def validateIssue(String idOrKey) {
+    String jiraSite = 'Demo Stack'
+    def issue = jiraGetIssue (site: jiraSite, idOrKey: idOrKey)
+    def transitions = jiraGetIssueTransitions(site: jiraSite, idOrKey: idOrKey)
+    // Create a variable from the issue state
+    def statusId = issue.data.fields.status.statusCategory.id.toString()
+    def statusName = issue.data.fields.status.statusCategory.name.toString()
+    // Validate that it's in the state that we want... in this case, 4 = 'In Progress'
+    return statusName
+}
